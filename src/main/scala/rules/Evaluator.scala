@@ -718,7 +718,8 @@ object evaluator extends EvaluationRules with Immutable {
 
             val tQuant = Quantification(qantOp, tVars, tBody, tTriggers, name)
             Q(s1, tQuant, v1)}
-
+       */
+      // sufficient for the most basic example
       case fapp @ ast.FuncApp(funcName, eArgs) =>
         val func = Verifier.program.findFunction(funcName)
         val s0 = s.copy(hackIssue387DisablePermissionConsumption = Verifier.config.enableMoreCompleteExhale())
@@ -808,7 +809,7 @@ object evaluator extends EvaluationRules with Immutable {
              *       joined snapshot could be defined and represented
              */
             })(join(v1.symbolConverter.toSort(func.typ), s"joined_${func.name}", joinFunctionArgs, v1))(Q)})
-      */
+     
 
       // UPDATE: eval case never used since unfolding expressions are only allowed in specifications by Gradual C0
       // However, kept here to support unfolding expressions everywhere in gradual viper
@@ -1432,6 +1433,100 @@ object evaluator extends EvaluationRules with Immutable {
           Q(s, unknownValue, v)
         }
 
+
+      case fapp @ ast.FuncApp(funcName, eArgs) =>
+        val func = Verifier.program.findFunction(funcName)
+        val s0 = s.copy(hackIssue387DisablePermissionConsumption = Verifier.config.enableMoreCompleteExhale())
+        evals2pc(s0, eArgs, Nil, _ => pve, v, false)((s1, tArgs, v1) => {
+//          bookkeeper.functionApplications += 1
+          val joinFunctionArgs = tArgs //++ c2a.quantifiedVariables.filterNot(tArgs.contains)
+          /* TODO: Does it matter that the above filterNot does not filter out quantified
+           *       variables that are not "raw" function arguments, but instead are used
+           *       in an expression that is used as a function argument?
+           *       E.g., in
+           *         forall i: Int :: fun(i*i)
+           *       the above filterNot will not remove i from the list of already
+           *       used quantified variables because i does not match i*i.
+           *       Hence, the joinedFApp will take two arguments, namely, i*i and i,
+           *       although the latter is not necessary.
+           */
+          joiner.join[Term, Term](s1, v1)((s2, v2, QB) => {
+            val pres = func.pres.map(_.transform {
+              /* [Malte 2018-08-20] Two examples of the test suite, one of which is the regression
+               * for Carbon issue #210, fail if the subsequent code that strips out triggers from
+               * exhaled function preconditions, is commented. The code was originally a work-around
+               * for Silicon issue #276. Removing triggers from function preconditions is OK-ish
+               * because they are consumed (exhaled), i.e. asserted. However, the triggers are
+               * also used to internally generated quantifiers, e.g. related to QPs. My hope is that
+               * this hack is no longer needed once heap-dependent triggers are supported.
+               */
+              case q: ast.Forall => q.copy(triggers = Nil)(q.pos, q.info, q.errT)
+            })
+            /* Formal function arguments are instantiated with the corresponding actual arguments
+             * by adding the corresponding bindings to the store. To avoid formals in error messages
+             * and to report actuals instead, we have two choices: the first is two attach a reason
+             * transformer to the partial verification error, as done below; the second is to attach
+             * a node transformer to every formal, as illustrated by NodeBacktranslationTests.scala.
+             * The first approach is slightly simpler and suffices here, though.
+             */
+            val fargs = func.formalArgs.map(_.localVar)
+            val formalsToActuals: Map[ast.LocalVar, ast.Exp] = fargs.zip(eArgs)(collection.breakOut)
+            val exampleTrafo = CounterexampleTransformer({
+              case ce: SiliconCounterexample => ce.withStore(s2.g)
+              case ce => ce
+            })
+            val pvePre =
+              ErrorWrapperWithExampleTransformer(PreconditionInAppFalse(fapp).withReasonNodeTransformed(reasonOffendingNode =>
+                reasonOffendingNode.replace(formalsToActuals)), exampleTrafo)
+            val s3 = s2.copy(g = Store(fargs.zip(tArgs)),
+                             recordVisited = true,
+                             functionRecorder = s2.functionRecorder.changeDepthBy(+1),
+                                /* Temporarily disable the recorder: when recording (to later on
+                                 * translate a particular function fun) and a function application
+                                 * fapp is hit, then there is no need to record any information
+                                 * about assertions from fapp's precondition since the latter is not
+                                 * translated as part of the translation of fun.
+                                 * Recording such information is even potentially harmful if formals
+                                 * are not syntactically replaced by actuals but rather bound to
+                                 * them via the store. Consider the following function:
+                                 *   function fun(x: Ref)
+                                 *     requires foo(x) // foo is another function
+                                 *     ...
+                                 *   { ... fun(x.next) ...}
+                                 * For fun(x)'s precondition, a mapping from foo(x) to a snapshot is
+                                 * recorded. When fun(x.next) is hit, its precondition is consumed,
+                                 * but without substituting actuals for formals, continuing to
+                                 * record mappings would add another mapping from foo(x) (which is
+                                 * actually foo(x.next)) to some potentially different snapshot.
+                                 * When translating fun(x) to an axiom, the snapshot of foo(x) from
+                                 * fun(x)'s precondition will be the branch-condition-dependent join
+                                 * of the recorded snapshots - which is wrong (probably only
+                                 * incomplete).
+                                 */
+                             smDomainNeeded = true,
+                             forFraming = true)
+            consumes(s3, pres, _ => pvePre, v2)((s4, snap, v3) => {
+              
+              val s4_1 = s4.copy(forFraming = false)
+
+              val snap1 = snap.convert(sorts.Snap)
+              val tFApp = App(v3.symbolConverter.toFunction(func), snap1 :: tArgs)
+              val fr5 =
+                s4_1.functionRecorder.changeDepthBy(-1)
+                  .recordSnapshot(fapp, v3.decider.pcs.branchConditions, snap1)
+              val s5 = s4_1.copy(g = s2.g,
+                               h = s2.h,
+                               recordVisited = s2.recordVisited,
+                               functionRecorder = fr5,
+                               smDomainNeeded = s2.smDomainNeeded,
+                               hackIssue387DisablePermissionConsumption = s.hackIssue387DisablePermissionConsumption)
+              QB(s5, tFApp, v3)})
+            /* TODO: The join-function is heap-independent, and it is not obvious how a
+             *       joined snapshot could be defined and represented
+             */
+            })(join(v1.symbolConverter.toSort(func.typ), s"joined_${func.name}", joinFunctionArgs, v1))(Q)})
+
+
       /* Others */
 
       /*
@@ -1642,97 +1737,6 @@ object evaluator extends EvaluationRules with Immutable {
             val tQuant = Quantification(qantOp, tVars, tBody, tTriggers, name)
             Q(s1, tQuant, v1)}
 
-      case fapp @ ast.FuncApp(funcName, eArgs) =>
-        val func = Verifier.program.findFunction(funcName)
-        val s0 = s.copy(hackIssue387DisablePermissionConsumption = Verifier.config.enableMoreCompleteExhale())
-        evals2pc(s0, eArgs, Nil, _ => pve, v)((s1, tArgs, v1) => {
-//          bookkeeper.functionApplications += 1
-          val joinFunctionArgs = tArgs //++ c2a.quantifiedVariables.filterNot(tArgs.contains)
-          /* TODO: Does it matter that the above filterNot does not filter out quantified
-           *       variables that are not "raw" function arguments, but instead are used
-           *       in an expression that is used as a function argument?
-           *       E.g., in
-           *         forall i: Int :: fun(i*i)
-           *       the above filterNot will not remove i from the list of already
-           *       used quantified variables because i does not match i*i.
-           *       Hence, the joinedFApp will take two arguments, namely, i*i and i,
-           *       although the latter is not necessary.
-           */
-          joiner.join[Term, Term](s1, v1)((s2, v2, QB) => {
-            val pres = func.pres.map(_.transform {
-              /* [Malte 2018-08-20] Two examples of the test suite, one of which is the regression
-               * for Carbon issue #210, fail if the subsequent code that strips out triggers from
-               * exhaled function preconditions, is commented. The code was originally a work-around
-               * for Silicon issue #276. Removing triggers from function preconditions is OK-ish
-               * because they are consumed (exhaled), i.e. asserted. However, the triggers are
-               * also used to internally generated quantifiers, e.g. related to QPs. My hope is that
-               * this hack is no longer needed once heap-dependent triggers are supported.
-               */
-              case q: ast.Forall => q.copy(triggers = Nil)(q.pos, q.info, q.errT)
-            })
-            /* Formal function arguments are instantiated with the corresponding actual arguments
-             * by adding the corresponding bindings to the store. To avoid formals in error messages
-             * and to report actuals instead, we have two choices: the first is two attach a reason
-             * transformer to the partial verification error, as done below; the second is to attach
-             * a node transformer to every formal, as illustrated by NodeBacktranslationTests.scala.
-             * The first approach is slightly simpler and suffices here, though.
-             */
-            val fargs = func.formalArgs.map(_.localVar)
-            val formalsToActuals: Map[ast.LocalVar, ast.Exp] = fargs.zip(eArgs)(collection.breakOut)
-            val exampleTrafo = CounterexampleTransformer({
-              case ce: SiliconCounterexample => ce.withStore(s2.g)
-              case ce => ce
-            })
-            val pvePre =
-              ErrorWrapperWithExampleTransformer(PreconditionInAppFalse(fapp).withReasonNodeTransformed(reasonOffendingNode =>
-                reasonOffendingNode.replace(formalsToActuals)), exampleTrafo)
-            val s3 = s2.copy(g = Store(fargs.zip(tArgs)),
-                             recordVisited = true,
-                             functionRecorder = s2.functionRecorder.changeDepthBy(+1),
-                                /* Temporarily disable the recorder: when recording (to later on
-                                 * translate a particular function fun) and a function application
-                                 * fapp is hit, then there is no need to record any information
-                                 * about assertions from fapp's precondition since the latter is not
-                                 * translated as part of the translation of fun.
-                                 * Recording such information is even potentially harmful if formals
-                                 * are not syntactically replaced by actuals but rather bound to
-                                 * them via the store. Consider the following function:
-                                 *   function fun(x: Ref)
-                                 *     requires foo(x) // foo is another function
-                                 *     ...
-                                 *   { ... fun(x.next) ...}
-                                 * For fun(x)'s precondition, a mapping from foo(x) to a snapshot is
-                                 * recorded. When fun(x.next) is hit, its precondition is consumed,
-                                 * but without substituting actuals for formals, continuing to
-                                 * record mappings would add another mapping from foo(x) (which is
-                                 * actually foo(x.next)) to some potentially different snapshot.
-                                 * When translating fun(x) to an axiom, the snapshot of foo(x) from
-                                 * fun(x)'s precondition will be the branch-condition-dependent join
-                                 * of the recorded snapshots - which is wrong (probably only
-                                 * incomplete).
-                                 */
-                             smDomainNeeded = true,
-                             forFraming = true)
-            consumes(s3, pres, _ => pvePre, v2)((s4, snap, v3) => {
-              
-              val s4_1 = s4.copy(forFraming = false)
-
-              val snap1 = snap.convert(sorts.Snap)
-              val tFApp = App(v3.symbolConverter.toFunction(func), snap1 :: tArgs)
-              val fr5 =
-                s4_1.functionRecorder.changeDepthBy(-1)
-                  .recordSnapshot(fapp, v3.decider.pcs.branchConditions, snap1)
-              val s5 = s4_1.copy(g = s2.g,
-                               h = s2.h,
-                               recordVisited = s2.recordVisited,
-                               functionRecorder = fr5,
-                               smDomainNeeded = s2.smDomainNeeded,
-                               hackIssue387DisablePermissionConsumption = s.hackIssue387DisablePermissionConsumption)
-              QB(s5, tFApp, v3)})
-            /* TODO: The join-function is heap-independent, and it is not obvious how a
-             *       joined snapshot could be defined and represented
-             */
-            })(join(v1.symbolConverter.toSort(func.typ), s"joined_${func.name}", joinFunctionArgs, v1))(Q)})
 
       case ast.Unfolding(
               acc @ ast.PredicateAccessPredicate(pa @ ast.PredicateAccess(eArgs, predicateName), ePerm),
