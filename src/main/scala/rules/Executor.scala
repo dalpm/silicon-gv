@@ -317,12 +317,16 @@ object executor extends ExecutionRules with Immutable {
                * in freshPositions, so we need to add them to freshPositions
                */
               val freshVar = v.decider.fresh(x)
-              val existingTerm = map(x)
+              val existingTerm = map.get(x)
               /* if the variable cannot be found in freshPositions, it means
                * that it has not been assigned to yet
                */
-              if (SymbExLogger.enabled && SymbExLogger.freshPositions.contains(existingTerm)) {
-                SymbExLogger.freshPositions += freshVar -> SymbExLogger.freshPositions(existingTerm)
+              existingTerm match {
+                case Some(term) =>
+                  if (SymbExLogger.enabled && SymbExLogger.freshPositions.contains(term)) {
+                    SymbExLogger.freshPositions += freshVar -> SymbExLogger.freshPositions(term)
+                  }
+                case None =>
               }
               map.updated(x, freshVar)
             } ))
@@ -598,7 +602,7 @@ object executor extends ExecutionRules with Immutable {
 
       // commenting this out causes disjunction_fast to fail
       // also I think we have a problem with error messages
-      /*
+      
       case inhale @ ast.Inhale(a) => a match {
         case _: ast.FalseLit =>
           Success()
@@ -612,7 +616,7 @@ object executor extends ExecutionRules with Immutable {
         val pve = ExhaleFailed(exhale)
         consume(s, a, pve, v)((s1, _, v1) =>
           Q(s1, v1))
-      */
+      
       case assert @ ast.Assert(a) =>
         val pve = AssertFailed(assert)
 
